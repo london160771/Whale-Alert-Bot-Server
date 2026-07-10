@@ -1,10 +1,14 @@
 import "dotenv/config";
 import express from "express";
+import cors from "cors";
 import { isValidSignature } from "./verifySignature.js";
 import { getUsdPrice } from "./priceFeed.js";
 import { postWhaleAlert } from "./discord.js";
+import { connectDB } from "./db.js";
+import { Alert } from "./models/Alert.js";
 
 const app = express();
+app.use(cors()); // allows the dashboard (hosted on a different domain) to call this API
 
 // We need the raw request body (not pre-parsed JSON) to verify Alchemy's signature,
 // so we capture it here before express.json() parses it.
@@ -19,11 +23,14 @@ app.use(
 const {
   ALCHEMY_SIGNING_KEY,
   DISCORD_WEBHOOK_URL,
-  WHALE_THRESHOLD_USD = "1000000",
+  WHALE_THRESHOLD_USD = "500000",
+  MONGODB_URI,
   PORT = 3000,
 } = process.env;
 
 const THRESHOLD = Number(WHALE_THRESHOLD_USD);
+
+connectDB(MONGODB_URI);
 
 // Dedupe recent transaction hashes in memory. Good enough for MVP —
 // if the process restarts, the set resets, which is an acceptable tradeoff for now.
@@ -32,6 +39,19 @@ const MAX_SEEN = 5000; // simple cap so this never grows unbounded
 
 app.get("/", (_req, res) => {
   res.send("Whale alert bot is running.");
+});
+
+// Dashboard-facing API: returns recent alerts, newest first.
+// ?limit=50 caps how many are returned (default 50, max 200 to avoid abuse).
+app.get("/api/alerts", async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const alerts = await Alert.find().sort({ detectedAt: -1 }).limit(limit);
+    res.json(alerts);
+  } catch (err) {
+    console.error("[api] Failed to fetch alerts:", err.message);
+    res.status(500).json({ error: "Failed to fetch alerts" });
+  }
 });
 
 app.post("/webhooks/alchemy", async (req, res) => {
@@ -93,6 +113,22 @@ async function handleActivity(activity, network) {
   console.log(
     `[whale] ${label} ${value} ${asset} (~$${usdValue.toFixed(0)}) ${fromAddress} -> ${toAddress}`
   );
+
+  try {
+    await Alert.create({
+      txHash: hash,
+      network,
+      isTestnet,
+      asset,
+      amount: value,
+      usdValue,
+      fromAddress,
+      toAddress,
+    });
+  } catch (err) {
+    // Duplicate tx hash or DB hiccup shouldn't stop the Discord alert from going out
+    console.error("[db] Failed to save alert:", err.message);
+  }
 
   if (!DISCORD_WEBHOOK_URL) {
     console.warn("[whale] DISCORD_WEBHOOK_URL not set -- alert logged but not sent");
