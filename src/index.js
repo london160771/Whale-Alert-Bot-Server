@@ -23,7 +23,7 @@ app.use(
 const {
   ALCHEMY_SIGNING_KEY,
   DISCORD_WEBHOOK_URL,
-  WHALE_THRESHOLD_USD = "500000",
+  WHALE_THRESHOLD_USD = "1000000",
   MONGODB_URI,
   PORT = 3000,
 } = process.env;
@@ -90,7 +90,7 @@ const TESTNET_NETWORKS = new Set([
 ]);
 
 async function handleActivity(activity, network) {
-  const { fromAddress, toAddress, value, asset, hash, category } = activity;
+  const { fromAddress, toAddress, value, asset, hash, category, rawContract } = activity;
 
   if (!hash || !asset || typeof value !== "number") return;
   if (seenTxHashes.has(hash)) return;
@@ -98,9 +98,14 @@ async function handleActivity(activity, network) {
   // "external" = native ETH transfer, "token" = ERC-20 transfer
   if (category !== "external" && category !== "token") return;
 
+  // For ERC-20 transfers, Alchemy includes the token's contract address —
+  // we use that for price lookups instead of a manual symbol map, since it
+  // works for any token, not just the handful we'd otherwise hardcode.
+  const contractAddress = category === "token" ? rawContract?.address ?? null : null;
+
   const isTestnet = TESTNET_NETWORKS.has(network);
 
-  const price = await getUsdPrice(asset);
+  const price = await getUsdPrice(asset, contractAddress);
   if (price === null) return; // can't evaluate threshold without a price
 
   const usdValue = value * price;
